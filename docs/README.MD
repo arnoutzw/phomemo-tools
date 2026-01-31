@@ -326,229 +326,197 @@ F0 00                  Number of lines
 
 ### Current Status
 
-The phomemo-tools package is currently **Linux-only**. Running on macOS requires modifications due to platform differences in:
+Phomemo-tools now includes **full macOS support** including Apple Silicon (M1/M2/M3). The implementation uses a platform abstraction layer that automatically detects the operating system and uses the appropriate backend:
 
-1. **Bluetooth Stack** - Linux uses BlueZ/D-Bus; macOS uses IOBluetooth
-2. **Device Paths** - Linux uses `/dev/rfcomm*` and `/dev/usb/lp*`; macOS uses different paths
-3. **CUPS Directories** - Different installation paths on macOS
-4. **Python Dependencies** - Some packages behave differently on macOS
+| Feature | Linux | macOS | Notes |
+|---------|-------|-------|-------|
+| USB Printing | Yes | Yes | Automatic device detection |
+| USB Discovery | Yes | Yes | Via PyUSB |
+| Bluetooth Discovery | Yes | Yes | Via IOBluetooth |
+| Bluetooth Printing | Yes | Yes | Via IOBluetooth RFCOMM |
+| CUPS Backend | Yes | Yes | Cross-platform |
+| CUPS Filters | Yes | Yes | Pure Python/PIL |
+| Auto-Discovery | Yes | Yes | Full support |
 
-### Requirements for macOS Apple Silicon Support
+### Architecture
 
-#### 1. Bluetooth Connectivity
+The backend uses a modular architecture with platform-specific implementations:
 
-**Problem:** The current backend uses Linux-specific Bluetooth:
-- `socket.AF_BLUETOOTH` with `BTPROTO_RFCOMM`
-- D-Bus for BlueZ device discovery
-
-**Solution Options:**
-
-**Option A: PyObjC + IOBluetooth (Native)**
-```python
-# Example macOS Bluetooth RFCOMM connection
-from Foundation import *
-from IOBluetooth import *
-
-def connect_bluetooth_macos(address):
-    device = IOBluetoothDevice.deviceWithAddressString_(address)
-    channel = device.openRFCOMMChannelSync_withChannelID_delegate_(
-        None, 1, None
-    )
-    return channel
+```
+cups/backend/
+├── phomemo.py          # Main CUPS backend (platform-agnostic)
+├── platform.py         # Platform detection utilities
+├── bluetooth/
+│   ├── __init__.py     # Platform dispatcher
+│   ├── base.py         # Abstract interface
+│   ├── linux.py        # BlueZ/D-Bus implementation
+│   └── darwin.py       # IOBluetooth implementation
+└── usb/
+    ├── __init__.py     # Platform dispatcher
+    ├── base.py         # Abstract interface
+    ├── linux.py        # Linux USB paths
+    └── darwin.py       # macOS USB paths (/dev/cu.*)
 ```
 
-**Option B: bleak library (Cross-platform BLE)**
+### Quick Installation (macOS)
+
+Use the provided installation script for automatic setup:
+
 ```bash
-pip3 install bleak
-```
-Note: `bleak` is BLE-focused; RFCOMM classic Bluetooth may require PyObjC.
+# Clone repository
+git clone https://github.com/vivier/phomemo-tools.git
+cd phomemo-tools
 
-**Option C: Serial over USB only (Simplest)**
-- Focus on USB connectivity only for macOS
-- USB serial devices appear as `/dev/cu.usbmodem*` or `/dev/tty.usbmodem*`
-
-#### 2. USB Connectivity
-
-**Problem:** PyUSB device paths differ on macOS.
-
-**Solution:** USB printers on macOS appear as:
-```bash
-# List USB serial devices
-ls /dev/cu.* /dev/tty.*
-
-# Typical Phomemo USB device
-/dev/cu.usbmodem14201
+# Run installer
+./scripts/install-macos.sh
 ```
 
-Update the backend to detect macOS paths:
-```python
-import platform
-import glob
+The script will:
+1. Install Homebrew (if needed)
+2. Install Python dependencies (pillow, pyusb, pyobjc-framework-IOBluetooth)
+3. Build PPD files
+4. Install to `/usr/local/lib/cups/` (SIP-friendly)
+5. Configure CUPS
+6. Restart the CUPS service
 
-def find_usb_printer_macos():
-    if platform.system() == 'Darwin':
-        devices = glob.glob('/dev/cu.usbmodem*')
-        # Filter for Phomemo devices
-        return devices
-```
-
-#### 3. CUPS Installation Paths
-
-**Linux paths:**
-```
-/usr/lib/cups/backend/
-/usr/lib/cups/filter/
-/usr/share/cups/model/
-```
-
-**macOS paths:**
-```
-/usr/libexec/cups/backend/
-/usr/libexec/cups/filter/
-/Library/Printers/PPDs/Contents/Resources/
-```
-
-**Modified Makefile for macOS:**
-```makefile
-UNAME := $(shell uname)
-
-ifeq ($(UNAME), Darwin)
-    BACKEND_DIR = /usr/libexec/cups/backend
-    FILTER_DIR = /usr/libexec/cups/filter
-    PPD_DIR = /Library/Printers/PPDs/Contents/Resources/Phomemo
-else
-    BACKEND_DIR = /usr/lib/cups/backend
-    FILTER_DIR = /usr/lib/cups/filter
-    PPD_DIR = /usr/share/cups/model/Phomemo
-endif
-```
-
-#### 4. Python Dependencies on macOS
-
-Install via Homebrew:
-```bash
-# Install Homebrew (if not present)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install Python and dependencies
-brew install python3
-pip3 install pillow pyusb pyobjc-framework-IOBluetooth
-```
-
-#### 5. System Integrity Protection (SIP)
-
-macOS SIP may prevent writing to `/usr/libexec/cups/`. Options:
-
-1. **Use user-writable locations** (recommended):
-   ```
-   /usr/local/lib/cups/backend/
-   /usr/local/lib/cups/filter/
-   ```
-
-2. **Configure CUPS to use custom paths:**
-   Edit `/etc/cups/cups-files.conf`:
-   ```
-   ServerBin /usr/local/lib/cups
-   ```
-
-3. **Disable SIP** (not recommended for security reasons)
-
-### Step-by-Step macOS Installation Guide
+### Manual Installation (macOS)
 
 #### Prerequisites
 
 ```bash
-# 1. Install Homebrew
+# Install Homebrew
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# 2. Install dependencies
+# Install system dependencies
 brew install python3 libusb
-pip3 install pillow pyusb
 
-# 3. For Bluetooth support (optional)
-pip3 install pyobjc-framework-IOBluetooth
+# Install Python dependencies
+pip3 install -r requirements-macos.txt
 ```
 
-#### USB-Only Installation (Simplest)
+#### Build and Install
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/vivier/phomemo-tools.git
-cd phomemo-tools
-
-# 2. Build PPD files
 cd cups
-make
+make ppds
+sudo make install
+```
 
-# 3. Create directories
-sudo mkdir -p /usr/local/lib/cups/filter
-sudo mkdir -p /Library/Printers/PPDs/Contents/Resources/Phomemo
+The Makefile automatically detects macOS and uses appropriate paths:
+- Backend: `/usr/local/lib/cups/backend/`
+- Filters: `/usr/local/lib/cups/filter/`
+- PPDs: `/Library/Printers/PPDs/Contents/Resources/Phomemo/`
 
-# 4. Install filters
-sudo cp filter/rastertopm02_t02.py /usr/local/lib/cups/filter/
-sudo cp filter/rastertopm110.py /usr/local/lib/cups/filter/
-sudo cp filter/rastertopd30.py /usr/local/lib/cups/filter/
-sudo chmod 755 /usr/local/lib/cups/filter/*.py
+#### Configure CUPS
 
-# 5. Install PPD files
-sudo cp ppd/*.ppd.gz /Library/Printers/PPDs/Contents/Resources/Phomemo/
+Add to `/etc/cups/cups-files.conf`:
+```
+ServerBin /usr/local/lib/cups
+```
 
-# 6. Configure CUPS to use custom filter path
-echo "ServerBin /usr/local/lib/cups" | sudo tee -a /etc/cups/cups-files.conf
+Restart CUPS:
+```bash
 sudo launchctl stop org.cups.cupsd
 sudo launchctl start org.cups.cupsd
+```
 
-# 7. Add printer (find your USB device first)
+### Adding a Printer
+
+#### Via System Settings (GUI)
+
+1. Open **System Settings → Printers & Scanners**
+2. Click **+** to add a printer
+3. Your Phomemo printer should appear (if paired via Bluetooth or connected via USB)
+4. Select the appropriate PPD driver
+
+#### Via Command Line
+
+**Bluetooth:**
+```bash
+# Find your printer's MAC address
+/usr/local/lib/cups/backend/phomemo
+
+# Add printer
+sudo lpadmin -p PhomemoM02 -E \
+    -v phomemo://AABBCCDDEEFF \
+    -P /Library/Printers/PPDs/Contents/Resources/Phomemo/Phomemo-M02.ppd.gz
+```
+
+**USB:**
+```bash
+# Find USB device
 ls /dev/cu.usbmodem*
-# Example: /dev/cu.usbmodem14201
 
+# Add printer
 sudo lpadmin -p PhomemoM02 -E \
     -v serial:/dev/cu.usbmodem14201 \
     -P /Library/Printers/PPDs/Contents/Resources/Phomemo/Phomemo-M02.ppd.gz
 ```
 
-#### Direct USB Printing (Without CUPS)
+### Python Dependencies
 
-For quick printing without CUPS configuration:
-
-```bash
-# Find USB device
-ls /dev/cu.usbmodem*
-
-# Print directly
-python3 tools/phomemo-filter.py image.png > /dev/cu.usbmodem14201
+**requirements-macos.txt:**
+```
+pillow>=9.0.0
+pyusb>=1.2.0
+pyobjc-core>=9.0
+pyobjc-framework-Cocoa>=9.0
+pyobjc-framework-IOBluetooth>=9.0
+pyobjc-framework-CoreBluetooth>=9.0
 ```
 
-### Known Limitations on macOS
+### IOBluetooth Implementation Details
 
-| Feature | Linux | macOS | Notes |
-|---------|-------|-------|-------|
-| USB Printing | Yes | Yes* | Different device paths |
-| Bluetooth Discovery | Yes | No | Requires PyObjC rewrite |
-| Bluetooth Printing | Yes | No | Requires IOBluetooth |
-| CUPS Backend | Yes | Partial | USB only without BT |
-| CUPS Filters | Yes | Yes | Path modifications needed |
-| Auto-Discovery | Yes | No | Backend needs macOS port |
+The macOS Bluetooth implementation uses PyObjC to interface with Apple's IOBluetooth framework:
 
-*Requires manual device path configuration
+**Device Discovery:**
+```python
+from IOBluetooth import IOBluetoothDevice
 
-### Recommended Approach for macOS
+# Get all paired devices
+paired = IOBluetoothDevice.pairedDevices()
+for device in paired:
+    name = device.name()
+    address = device.addressString()
+```
 
-1. **Start with USB-only support** - Lowest effort, works with minor changes
-2. **Use direct printing** via `phomemo-filter.py` for simplest setup
-3. **Add CUPS support** with modified installation paths
-4. **Bluetooth support** would require significant PyObjC development
+**RFCOMM Connection:**
+```python
+device = IOBluetoothDevice.deviceWithAddressString_("AA:BB:CC:DD:EE:FF")
+result, channel = device.openRFCOMMChannelSync_withChannelID_delegate_(
+    None, 1, delegate
+)
+channel.writeSync_length_(data, len(data))
+```
 
-### Code Changes Required
+The implementation handles the callback-based nature of IOBluetooth by using NSRunLoop for synchronization.
 
-To fully support macOS, the following files need modification:
+### Troubleshooting (macOS)
 
-| File | Changes Needed |
-|------|----------------|
-| `cups/backend/phomemo.py` | Replace D-Bus with IOBluetooth, update USB paths |
-| `cups/Makefile` | Add macOS installation paths |
-| `cups/filter/*.py` | No changes (pure Python/PIL) |
-| `cups/drv/*.drv` | Update filter paths in PPD |
+#### Bluetooth Not Working
+
+1. Ensure the printer is paired in System Settings → Bluetooth
+2. Check PyObjC is installed: `pip3 show pyobjc-framework-IOBluetooth`
+3. Test discovery: `/usr/local/lib/cups/backend/phomemo`
+
+#### USB Not Detected
+
+1. Check device is connected: `ls /dev/cu.usbmodem*`
+2. Ensure libusb is installed: `brew install libusb`
+3. Check PyUSB: `python3 -c "import usb.core; print('OK')"`
+
+#### CUPS Filter Failure
+
+1. Check Python dependencies: `pip3 install pillow`
+2. Verify filter is executable: `ls -la /usr/local/lib/cups/filter/`
+3. Check CUPS logs: `tail -f /var/log/cups/error_log`
+
+#### SIP Blocking Installation
+
+Use `/usr/local/lib/cups/` instead of `/usr/libexec/cups/` and configure CUPS with:
+```
+ServerBin /usr/local/lib/cups
+```
 
 ---
 
