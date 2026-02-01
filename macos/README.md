@@ -1,17 +1,15 @@
-# Phomemo Tools - macOS USB Support (Test Build)
+# Phomemo Tools - macOS Support
 
-This directory contains experimental macOS support for Phomemo thermal printers via USB connection.
+Full macOS support for Phomemo thermal printers, including Apple Silicon (M1/M2/M3/M4).
 
-## Status
+## Features
 
-**This is a test build** for evaluating macOS USB support. Features:
-
-| Feature | Status |
-|---------|--------|
-| USB Connection | Experimental |
-| Bluetooth | Not Supported |
-| CUPS Integration | Experimental |
-| Direct Printing | Supported |
+| Feature | Status | Method |
+|---------|--------|--------|
+| USB Printing | Full | PyUSB |
+| Bluetooth Printing | Full | IOBluetooth/PyObjC |
+| CUPS Integration | Full | Native C filter + helper daemon |
+| Direct Printing | Full | Python scripts |
 
 ## Supported Printers
 
@@ -21,155 +19,224 @@ This directory contains experimental macOS support for Phomemo thermal printers 
 
 ## Requirements
 
-### System
 - macOS 10.15 (Catalina) or later
 - Python 3.8 or later
+- Xcode Command Line Tools
 
-### Dependencies
+## Quick Start
 
-Install these before proceeding:
+### 1. Install Dependencies
 
 ```bash
-# Install Homebrew if not already installed
+# Install Homebrew (if not installed)
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# Install libusb (required for PyUSB)
+# Install libusb
 brew install libusb
 
 # Install Python packages
-pip3 install Pillow pyusb
+pip3 install Pillow pyusb pyobjc-framework-IOBluetooth
 ```
 
-## Installation
+### 2. Direct Printing (Simplest)
 
-### Option 1: Using Makefile
+#### Bluetooth
 
 ```bash
-# Check dependencies
-make check
+# Pair printer in System Settings > Bluetooth first
+python3 print-bluetooth.py image.png
+```
 
-# Install drivers (requires sudo)
+#### USB
+
+```bash
+python3 print-usb.py image.png
+```
+
+### 3. CUPS Printing (Full Integration)
+
+```bash
+# Install CUPS components
+cd ../cups
+make filters
 sudo make install
+
+# Install Bluetooth helper (for BT printing via CUPS)
+cd ../macos
+./install-bt-helper.sh
+
+# Add printer in System Settings > Printers & Scanners
 ```
 
-### Option 2: Using install script
+## Direct Printing Scripts
+
+### print-bluetooth.py
+
+Prints directly to a Bluetooth-paired Phomemo printer.
 
 ```bash
-sudo ./install.sh
+python3 print-bluetooth.py <image_file>
 ```
 
-### Option 3: Manual Installation
+Features:
+- Auto-detects paired Phomemo printers
+- Converts images to printer format
+- Supports all Phomemo models
+
+### print-usb.py
+
+Prints directly via USB connection.
 
 ```bash
-# Create directories
-sudo mkdir -p /usr/local/libexec/cups/filter
-sudo mkdir -p /usr/local/libexec/cups/backend
-
-# Install filters
-sudo cp ../cups/filter/rastertopm02_t02.py /usr/local/libexec/cups/filter/rastertopm02_t02
-sudo cp ../cups/filter/rastertopm110.py /usr/local/libexec/cups/filter/rastertopm110
-sudo cp ../cups/filter/rastertopd30.py /usr/local/libexec/cups/filter/rastertopd30
-sudo chmod 755 /usr/local/libexec/cups/filter/rastertopm*
-sudo chmod 755 /usr/local/libexec/cups/filter/rastertopd30
-
-# Install backend
-sudo cp backend/phomemo-usb.py /usr/local/libexec/cups/backend/phomemo
-sudo chmod 755 /usr/local/libexec/cups/backend/phomemo
-
-# Restart CUPS
-sudo launchctl stop org.cups.cupsd
-sudo launchctl start org.cups.cupsd
+python3 print-usb.py <image_file>
 ```
 
-## Usage
+Features:
+- Auto-detects USB Phomemo printers
+- Supports multiple vendor IDs (0x0493, 0x0483)
+- Works with all USB-capable models
 
-### Direct Printing (Recommended for Testing)
+## CUPS Integration
 
-The simplest way to test is using direct USB printing:
+### How It Works
+
+macOS security (TCC) prevents CUPS from accessing Bluetooth directly. This is solved with a helper daemon architecture:
+
+```
+CUPS → phomemo-bt backend → Unix socket → Helper daemon → Bluetooth → Printer
+```
+
+The helper daemon runs as a user LaunchAgent with Bluetooth permissions.
+
+### Installation
 
 ```bash
-# Find your printer's USB device
-ls /dev/cu.usbmodem*
-
-# Print an image directly
-python3 ../tools/phomemo-filter.py image.png > /dev/cu.usbmodemXXXX
+./install-bt-helper.sh
 ```
 
-### CUPS Printing
+This installs:
+- `phomemo-bt-helper.py` → `~/Library/Application Support/Phomemo/`
+- `com.phomemo.bt-helper.plist` → `~/Library/LaunchAgents/`
+- `phomemo-bt` → `/usr/libexec/cups/backend/`
 
-After installation:
+### Adding a Bluetooth Printer
 
-1. Open **System Preferences > Printers & Scanners**
-2. Click **+** to add a printer
-3. Select your Phomemo printer from the USB list
-4. Choose the appropriate driver (PPD)
+1. Pair printer in **System Settings > Bluetooth**
+2. Open **System Settings > Printers & Scanners**
+3. Click **+** to add printer
+4. Your Phomemo printer should appear with `phomemo-bt://` URI
+5. Select appropriate PPD driver
 
-### Test USB Detection
+### Manual Printer Setup
 
 ```bash
-# Run the backend in discovery mode
-python3 backend/phomemo-usb.py
-```
+# List paired Bluetooth devices
+python3 -c "
+from IOBluetooth import IOBluetoothDevice
+for d in IOBluetoothDevice.pairedDevices() or []:
+    print(f'{d.name()}: {d.addressString()}')
+"
 
-This should list any connected Phomemo USB printers.
+# Add printer manually
+sudo lpadmin -p M220_BT -E \
+    -v phomemo-bt://f9-29-79-d5-7b-fe \
+    -P /Library/Printers/PPDs/Contents/Resources/Phomemo/Phomemo-M220.ppd
+
+# Print test
+echo "Hello" | lp -d M220_BT
+```
 
 ## Troubleshooting
+
+### Bluetooth Helper Not Running
+
+```bash
+# Check socket exists
+ls -la /tmp/phomemo-bt.sock
+
+# View logs
+tail -f /tmp/phomemo-bt-helper.log
+
+# Restart helper
+launchctl unload ~/Library/LaunchAgents/com.phomemo.bt-helper.plist
+launchctl load ~/Library/LaunchAgents/com.phomemo.bt-helper.plist
+```
+
+### "No module named 'objc'"
+
+Install PyObjC:
+```bash
+pip3 install pyobjc-framework-IOBluetooth
+```
 
 ### "No module named 'usb'"
 
 Install PyUSB:
 ```bash
 pip3 install pyusb
-```
-
-### "No backend available"
-
-Install libusb:
-```bash
 brew install libusb
 ```
 
-### USB device not found
+### Bluetooth Printer Not Found
 
-1. Check the printer is connected and powered on
-2. Try a different USB port
-3. On Apple Silicon Macs, check **System Preferences > Security & Privacy** for USB permissions
-4. List USB devices: `system_profiler SPUSBDataType | grep -A 10 Phomemo`
+1. Check printer is paired in System Settings > Bluetooth
+2. Grant Bluetooth access to Terminal: System Settings > Privacy & Security > Bluetooth
+3. Test discovery:
+   ```bash
+   python3 -c "from IOBluetooth import IOBluetoothDevice; print([d.name() for d in IOBluetoothDevice.pairedDevices() or []])"
+   ```
 
-### Permission denied
+### CUPS Filter Failed
 
-The CUPS backend needs to run as root. Ensure it's installed with mode 755:
+macOS sandbox blocks Python filters. Use the native C filter:
 ```bash
-ls -la /usr/local/libexec/cups/backend/phomemo
+cd ../cups
+make filters
+sudo make install
 ```
 
-### CUPS not finding the printer
+### USB Device Not Found
 
-1. Check CUPS error log: `tail -f /var/log/cups/error_log`
-2. Restart CUPS: `sudo launchctl stop org.cups.cupsd && sudo launchctl start org.cups.cupsd`
-3. Check backend is executable: `sudo /usr/local/libexec/cups/backend/phomemo`
+1. Check printer is connected and powered on
+2. Try different USB port
+3. Check USB permissions in System Settings > Privacy & Security
+4. List USB devices:
+   ```bash
+   system_profiler SPUSBDataType | grep -A5 -i phomemo
+   ```
+
+### CUPS Printer Disabled After Error
+
+```bash
+cupsenable <printer_name>
+```
 
 ## Uninstallation
 
 ```bash
-sudo make uninstall
-```
+# Remove helper daemon
+launchctl unload ~/Library/LaunchAgents/com.phomemo.bt-helper.plist
+rm ~/Library/LaunchAgents/com.phomemo.bt-helper.plist
+rm -rf ~/Library/Application\ Support/Phomemo
 
-Or manually:
-```bash
-sudo rm /usr/local/libexec/cups/filter/rastertopm*
-sudo rm /usr/local/libexec/cups/filter/rastertopd30
-sudo rm /usr/local/libexec/cups/backend/phomemo
+# Remove CUPS backend (requires sudo)
+sudo rm /usr/libexec/cups/backend/phomemo-bt
+
+# Remove CUPS filter and PPDs
+sudo rm /usr/libexec/cups/filter/rastertopm110
 sudo rm -rf /Library/Printers/PPDs/Contents/Resources/Phomemo
-sudo rm -rf /usr/local/share/phomemo
 ```
 
-## Known Limitations
+## Files
 
-1. **Bluetooth not supported**: macOS uses IOBluetooth framework which requires different implementation
-2. **USB hot-plug**: CUPS may not detect newly connected printers automatically; restart CUPS if needed
-3. **System Integrity Protection**: On some systems, you may need to disable SIP to install to system directories
+| File | Description |
+|------|-------------|
+| `print-bluetooth.py` | Direct Bluetooth printing script |
+| `print-usb.py` | Direct USB printing script |
+| `phomemo-bt-helper.py` | CUPS Bluetooth helper daemon |
+| `com.phomemo.bt-helper.plist` | LaunchAgent for helper daemon |
+| `install-bt-helper.sh` | Installation script |
 
-## Feedback
+## License
 
-This is a test build. Please report any issues or feedback to help improve macOS support.
+GNU General Public License v3
