@@ -93,13 +93,20 @@ install-linux: install-filters install-backend install-ppds
 	$(INSTALL) -m 644 drv/phomemo-d30.drv $(CUPS_DRV_DIR)/
 	$(INSTALL) -m 644 drv/phomemo-m421.drv $(CUPS_DRV_DIR)/
 
+# macOS Bluetooth backend installation
+install-bt-backend:
+	$(INSTALL) -m 755 backend/phomemo-bt-socket /usr/libexec/cups/backend/phomemo-bt
+
 # macOS-specific installation
-install-darwin: install-filters install-ppds
+install-darwin: install-filters install-ppds install-bt-backend
 	@echo ""
 	@echo "=== macOS Installation Complete ==="
 	@echo ""
 	@echo "The C filter has been installed to /usr/libexec/cups/filter/"
-	@echo "(Python filters don't work on macOS due to sandbox restrictions)"
+	@echo "The Bluetooth backend has been installed to /usr/libexec/cups/backend/"
+	@echo ""
+	@echo "For Bluetooth printing, also run:"
+	@echo "    cd ../macos && ./install-bt-helper.sh"
 	@echo ""
 	@echo "Restart CUPS to apply changes:"
 	@echo "    sudo launchctl stop org.cups.cupsd"

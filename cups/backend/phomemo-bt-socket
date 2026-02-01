@@ -1,0 +1,181 @@
+#!/bin/bash
+#
+# phomemo-bt-socket - CUPS backend for Phomemo Bluetooth printers via helper daemon
+#
+# This backend communicates with the phomemo-bt-helper daemon via Unix socket.
+# The helper daemon runs as a user LaunchAgent with Bluetooth permissions.
+#
+# Install:
+#   sudo cp phomemo-bt-socket /usr/libexec/cups/backend/phomemo-bt
+#   sudo chmod 755 /usr/libexec/cups/backend/phomemo-bt
+
+SOCKET_PATH="/tmp/phomemo-bt.sock"
+HELPER_APP="$HOME/Library/Application Support/Phomemo/phomemo-bt-helper.py"
+
+# Debug logging
+log() {
+    echo "DEBUG: $*" >&2
+}
+
+error() {
+    echo "ERROR: $*" >&2
+}
+
+# Discovery mode - list available printers
+list_devices() {
+    # Use Python to list Bluetooth devices (works with IOBluetooth via PyObjC)
+    # Fall back to simple patterns for the shell script portion
+    python3 - 2>/dev/null <<'PYTHON_DISCOVERY' || true
+import re
+try:
+    from IOBluetooth import IOBluetoothDevice
+
+    patterns = ['M02', 'M110', 'M120', 'M220', 'M421', 'T02', 'D30']
+    serial_re = re.compile(r'^[A-Z]\d{3}[A-Z]\d{2}[A-Z]\d+$')
+
+    for device in IOBluetoothDevice.pairedDevices() or []:
+        name = device.name()
+        if not name:
+            continue
+
+        upper_name = name.upper()
+        is_phomemo = False
+        model = 'Phomemo'
+
+        for pattern in patterns:
+            if pattern in upper_name:
+                is_phomemo = True
+                model = pattern
+                break
+
+        if not is_phomemo and serial_re.match(name):
+            is_phomemo = True
+
+        if is_phomemo:
+            address = device.addressString()
+            # CUPS format: class uri "make-model" "info" "device-id"
+            print(f'direct phomemo-bt://{address} "{model}" "{name} ({address})" ""')
+except:
+    pass
+PYTHON_DISCOVERY
+}
+
+# Print job
+print_job() {
+    local device_uri="$DEVICE_URI"
+    local job_id="$1"
+    local user="$2"
+    local title="$3"
+    local copies="$4"
+    local options="$5"
+    local file="$6"
+
+    log "Print job starting, URI: $device_uri"
+
+    # Parse Bluetooth address from URI: phomemo-bt://XX-XX-XX-XX-XX-XX
+    local address="${device_uri#phomemo-bt://}"
+    log "Bluetooth address: $address"
+
+    # Check if helper socket exists
+    if [ ! -S "$SOCKET_PATH" ]; then
+        error "Helper daemon not running. Please start it first:"
+        error "  launchctl load ~/Library/LaunchAgents/com.phomemo.bt-helper.plist"
+        return 1
+    fi
+
+    # Read print data
+    local tmpfile=$(mktemp)
+    if [ -n "$file" ] && [ -f "$file" ]; then
+        cat "$file" > "$tmpfile"
+    else
+        cat > "$tmpfile"
+    fi
+
+    local data_size=$(stat -f%z "$tmpfile" 2>/dev/null || stat -c%s "$tmpfile" 2>/dev/null)
+    log "Data size: $data_size bytes"
+
+    # Send to helper via Python (for proper socket handling)
+    /usr/bin/python3 - "$address" "$tmpfile" <<'PYTHON_SCRIPT'
+import sys
+import socket
+import struct
+import os
+
+address = sys.argv[1]
+tmpfile = sys.argv[2]
+
+SOCKET_PATH = "/tmp/phomemo-bt.sock"
+
+try:
+    # Connect to helper
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(SOCKET_PATH)
+    sock.settimeout(60.0)
+
+    # Send address length and address
+    addr_bytes = address.encode('utf-8')
+    sock.send(struct.pack("!I", len(addr_bytes)))
+    sock.send(addr_bytes)
+
+    # Wait for connection confirmation
+    response = sock.recv(1024).decode('utf-8')
+    if not response.startswith("OK:"):
+        print(f"ERROR: {response}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"DEBUG: {response.strip()}", file=sys.stderr)
+
+    # Send print data
+    with open(tmpfile, 'rb') as f:
+        while True:
+            chunk = f.read(4096)
+            if not chunk:
+                break
+            sock.send(chunk)
+
+    # Close send side to signal end of data
+    sock.shutdown(socket.SHUT_WR)
+
+    # Wait for completion response
+    response = sock.recv(1024).decode('utf-8')
+    print(f"DEBUG: {response.strip()}", file=sys.stderr)
+
+    sock.close()
+
+    if response.startswith("OK:"):
+        sys.exit(0)
+    else:
+        print(f"ERROR: {response}", file=sys.stderr)
+        sys.exit(1)
+
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PYTHON_SCRIPT
+
+    local result=$?
+    rm -f "$tmpfile"
+
+    if [ $result -eq 0 ]; then
+        echo "STATE: +cups-waiting-for-job-completed" >&2
+        log "Print job complete"
+    fi
+
+    return $result
+}
+
+# Main
+case $# in
+    0)
+        # Discovery mode
+        list_devices
+        ;;
+    5|6)
+        # Print job: job-id user title copies options [file]
+        print_job "$@"
+        ;;
+    *)
+        echo "Usage: $0 job-id user title copies options [file]" >&2
+        exit 1
+        ;;
+esac
