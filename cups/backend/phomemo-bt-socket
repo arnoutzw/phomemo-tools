@@ -3,14 +3,9 @@
 # phomemo-bt-socket - CUPS backend for Phomemo Bluetooth printers via helper daemon
 #
 # This backend communicates with the phomemo-bt-helper daemon via Unix socket.
-# The helper daemon runs as a user LaunchAgent with Bluetooth permissions.
-#
-# Install:
-#   sudo cp phomemo-bt-socket /usr/libexec/cups/backend/phomemo-bt
-#   sudo chmod 755 /usr/libexec/cups/backend/phomemo-bt
+# Uses bash and nc (netcat) to avoid Python sandbox issues.
 
 SOCKET_PATH="/tmp/phomemo-bt.sock"
-HELPER_APP="$HOME/Library/Application Support/Phomemo/phomemo-bt-helper.py"
 
 # Debug logging
 log() {
@@ -21,43 +16,20 @@ error() {
     echo "ERROR: $*" >&2
 }
 
-# Discovery mode - list available printers
+# Convert number to 4-byte big-endian binary
+uint32_be() {
+    local n=$1
+    printf "\\x$(printf '%02x' $(( (n >> 24) & 0xff )))"
+    printf "\\x$(printf '%02x' $(( (n >> 16) & 0xff )))"
+    printf "\\x$(printf '%02x' $(( (n >> 8) & 0xff )))"
+    printf "\\x$(printf '%02x' $(( n & 0xff )))"
+}
+
+# Discovery mode - list available printers (simplified, returns nothing in sandbox)
 list_devices() {
-    # Use Python to list Bluetooth devices (works with IOBluetooth via PyObjC)
-    # Fall back to simple patterns for the shell script portion
-    python3 - 2>/dev/null <<'PYTHON_DISCOVERY' || true
-import re
-try:
-    from IOBluetooth import IOBluetoothDevice
-
-    patterns = ['M02', 'M110', 'M120', 'M220', 'M421', 'T02', 'D30']
-    serial_re = re.compile(r'^[A-Z]\d{3}[A-Z]\d{2}[A-Z]\d+$')
-
-    for device in IOBluetoothDevice.pairedDevices() or []:
-        name = device.name()
-        if not name:
-            continue
-
-        upper_name = name.upper()
-        is_phomemo = False
-        model = 'Phomemo'
-
-        for pattern in patterns:
-            if pattern in upper_name:
-                is_phomemo = True
-                model = pattern
-                break
-
-        if not is_phomemo and serial_re.match(name):
-            is_phomemo = True
-
-        if is_phomemo:
-            address = device.addressString()
-            # CUPS format: class uri "make-model" "info" "device-id"
-            print(f'direct phomemo-bt://{address} "{model}" "{name} ({address})" ""')
-except:
-    pass
-PYTHON_DISCOVERY
+    # Can't run Python in CUPS sandbox, so discovery is limited
+    # Users should add printers manually with the phomemo-bt:// URI
+    :
 }
 
 # Print job
@@ -83,85 +55,48 @@ print_job() {
         return 1
     fi
 
-    # Read print data
-    local tmpfile=$(mktemp)
+    # Create temp file for print data
+    local tmpfile="/var/spool/cups/tmp/phomemo-$$"
     if [ -n "$file" ] && [ -f "$file" ]; then
-        cat "$file" > "$tmpfile"
+        cp "$file" "$tmpfile"
     else
         cat > "$tmpfile"
     fi
 
-    local data_size=$(stat -f%z "$tmpfile" 2>/dev/null || stat -c%s "$tmpfile" 2>/dev/null)
+    local data_size=$(stat -f%z "$tmpfile" 2>/dev/null || echo "0")
     log "Data size: $data_size bytes"
 
-    # Send to helper via Python (for proper socket handling)
-    /usr/bin/python3 - "$address" "$tmpfile" <<'PYTHON_SCRIPT'
-import sys
-import socket
-import struct
-import os
+    # Create request: 4-byte length + address
+    local addr_len=${#address}
+    local header_file="/var/spool/cups/tmp/phomemo-hdr-$$"
+    uint32_be $addr_len > "$header_file"
+    printf "%s" "$address" >> "$header_file"
 
-address = sys.argv[1]
-tmpfile = sys.argv[2]
+    # Send to helper via nc
+    # The helper daemon handles connection and data transfer
+    # We send header+address followed by print data, then close
+    (cat "$header_file"; sleep 0.3; cat "$tmpfile") | nc -U "$SOCKET_PATH" >/dev/null 2>&1 &
+    local nc_pid=$!
 
-SOCKET_PATH = "/tmp/phomemo-bt.sock"
-
-try:
-    # Connect to helper
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(SOCKET_PATH)
-    sock.settimeout(60.0)
-
-    # Send address length and address
-    addr_bytes = address.encode('utf-8')
-    sock.send(struct.pack("!I", len(addr_bytes)))
-    sock.send(addr_bytes)
-
-    # Wait for connection confirmation
-    response = sock.recv(1024).decode('utf-8')
-    if not response.startswith("OK:"):
-        print(f"ERROR: {response}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"DEBUG: {response.strip()}", file=sys.stderr)
-
-    # Send print data
-    with open(tmpfile, 'rb') as f:
-        while True:
-            chunk = f.read(4096)
-            if not chunk:
-                break
-            sock.send(chunk)
-
-    # Close send side to signal end of data
-    sock.shutdown(socket.SHUT_WR)
-
-    # Wait for completion response
-    response = sock.recv(1024).decode('utf-8')
-    print(f"DEBUG: {response.strip()}", file=sys.stderr)
-
-    sock.close()
-
-    if response.startswith("OK:"):
-        sys.exit(0)
-    else:
-        print(f"ERROR: {response}", file=sys.stderr)
-        sys.exit(1)
-
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-PYTHON_SCRIPT
-
+    # Wait for nc to finish (data sent when nc exits)
+    wait $nc_pid 2>/dev/null
     local result=$?
-    rm -f "$tmpfile"
 
-    if [ $result -eq 0 ]; then
+    rm -f "$tmpfile" "$header_file"
+
+    # nc exit codes:
+    # 0 = success
+    # 141 = SIGPIPE (128+13) - server closed connection, data was sent
+    # Other = actual error
+    if [ $result -eq 0 ] || [ $result -eq 141 ]; then
+        log "Data sent to helper daemon (nc exit: $result)"
         echo "STATE: +cups-waiting-for-job-completed" >&2
         log "Print job complete"
+        return 0
+    else
+        error "Failed to connect to helper daemon (nc exit: $result)"
+        return 1
     fi
-
-    return $result
 }
 
 # Main
