@@ -30,19 +30,31 @@ endif
 BLUETOOTH_DIR = $(CUPS_BACKEND_DIR)/bluetooth
 USB_DIR = $(CUPS_BACKEND_DIR)/usb
 
-.PHONY: all ppds install install-linux install-darwin install-common clean
+.PHONY: all ppds filters install install-linux install-darwin install-common clean
 
-all: ppds
+all: ppds filters
 
 ppds:
 	LC_ALL=C ppdc -z drv/*
 
-# Common installation targets (platform-agnostic filters)
+# Compile C filters (required for macOS due to Python sandbox restrictions)
+filters:
+ifeq ($(UNAME), Darwin)
+	gcc -o filter/rastertopm110 filter/rastertopm110.c -lcups -lcupsimage
+endif
+
+# Filter installation (platform-specific)
 install-filters:
 	$(INSTALL_DIR) $(CUPS_FILTER_DIR)
+ifeq ($(UNAME), Darwin)
+	# macOS: Use compiled C filter (Python blocked by sandbox)
+	$(INSTALL) -m 755 filter/rastertopm110 /usr/libexec/cups/filter/rastertopm110
+else
+	# Linux: Use Python filters
 	$(INSTALL) -m 755 filter/rastertopm02_t02.py $(CUPS_FILTER_DIR)/rastertopm02_t02
 	$(INSTALL) -m 755 filter/rastertopm110.py $(CUPS_FILTER_DIR)/rastertopm110
 	$(INSTALL) -m 755 filter/rastertopd30.py $(CUPS_FILTER_DIR)/rastertopd30
+endif
 
 # Backend and Python modules installation
 install-backend:
@@ -63,13 +75,13 @@ install-backend:
 # PPD files installation
 install-ppds:
 	$(INSTALL_DIR) $(CUPS_PPD_DIR)
-	$(INSTALL) -m 644 ppd/Phomemo-M02.ppd.gz $(CUPS_PPD_DIR)/
-	$(INSTALL) -m 644 ppd/Phomemo-M02Pro.ppd.gz $(CUPS_PPD_DIR)/
-	$(INSTALL) -m 644 ppd/Phomemo-T02.ppd.gz $(CUPS_PPD_DIR)/
-	$(INSTALL) -m 644 ppd/Phomemo-D30.ppd.gz $(CUPS_PPD_DIR)/
-	$(INSTALL) -m 644 ppd/Phomemo-M110.ppd.gz $(CUPS_PPD_DIR)/
-	$(INSTALL) -m 644 ppd/Phomemo-M220.ppd.gz $(CUPS_PPD_DIR)/
-	$(INSTALL) -m 644 ppd/Phomemo-M421.ppd.gz $(CUPS_PPD_DIR)/
+	$(INSTALL) -m 644 ppd/Phomemo-M02.ppd $(CUPS_PPD_DIR)/
+	$(INSTALL) -m 644 ppd/Phomemo-M02Pro.ppd $(CUPS_PPD_DIR)/
+	$(INSTALL) -m 644 ppd/Phomemo-T02.ppd $(CUPS_PPD_DIR)/
+	$(INSTALL) -m 644 ppd/Phomemo-D30.ppd $(CUPS_PPD_DIR)/
+	$(INSTALL) -m 644 ppd/Phomemo-M110.ppd $(CUPS_PPD_DIR)/
+	$(INSTALL) -m 644 ppd/Phomemo-M220.ppd $(CUPS_PPD_DIR)/
+	$(INSTALL) -m 644 ppd/Phomemo-M421.ppd $(CUPS_PPD_DIR)/
 
 # Linux-specific installation (includes DRV files)
 install-linux: install-filters install-backend install-ppds
@@ -82,15 +94,14 @@ install-linux: install-filters install-backend install-ppds
 	$(INSTALL) -m 644 drv/phomemo-m421.drv $(CUPS_DRV_DIR)/
 
 # macOS-specific installation
-install-darwin: install-filters install-backend install-ppds
+install-darwin: install-filters install-ppds
 	@echo ""
 	@echo "=== macOS Installation Complete ==="
 	@echo ""
-	@echo "NOTE: You may need to configure CUPS to use the custom backend path."
-	@echo "Add this line to /etc/cups/cups-files.conf if not already present:"
-	@echo "    ServerBin /usr/local/lib/cups"
+	@echo "The C filter has been installed to /usr/libexec/cups/filter/"
+	@echo "(Python filters don't work on macOS due to sandbox restrictions)"
 	@echo ""
-	@echo "Then restart CUPS:"
+	@echo "Restart CUPS to apply changes:"
 	@echo "    sudo launchctl stop org.cups.cupsd"
 	@echo "    sudo launchctl start org.cups.cupsd"
 	@echo ""
@@ -105,3 +116,4 @@ endif
 
 clean:
 	rm -f ppd/*.ppd.gz
+	rm -f filter/rastertopm110
